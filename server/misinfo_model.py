@@ -163,24 +163,28 @@ def add_or_update_trusted_sources_batch(domain_scores: Dict[str, float]):
 # ---------------- Gemini helper ----------------
 @retry
 def ask_gemini_structured(prompt: str) -> Dict[str, Any]:
-    
     try:
         resp = GEM_MODEL.generate_content(prompt)
-        text = getattr(resp, "text", str(resp)).strip()
+        text = ""
+        try:
+            text = resp.candidates[0].content.parts[0].text.strip()
+        except Exception:
+            text = getattr(resp, "text", "").strip() or str(resp)
         try:
             parsed = json.loads(text)
             return {"parsed": parsed, "raw_text": text}
-        except json.JSONDecodeError:
-            match = re.search(r"(\{(?:.|\s)*\})", text)
+        except Exception:
+            match = re.search(r"\{[\s\S]*\}", text)
             if match:
                 try:
-                    parsed = json.loads(match.group(1))
+                    parsed = json.loads(match.group(0))
                     return {"parsed": parsed, "raw_text": text}
                 except Exception:
                     pass
-            return {"raw_text": text}
+            return {"parsed": {}, "raw_text": text}
+
     except Exception as e:
-        return {"error": str(e)}
+        return {"error": str(e), "parsed": {}}
 
 # ---------------- Google Fact Check API ----------------
 def query_google_fact_check_api(text: str, max_results=5) -> dict:
@@ -350,22 +354,25 @@ def predict_with_vertex_ai(metadata: dict) -> dict:
 
 
 def extract_vertex_scores(vertex_result: dict) -> dict:
-
     try:
         preds = vertex_result.get("predictions", [{}])[0]
         classes = preds.get("classes", [])
         scores = preds.get("scores", [])
+
+        if not isinstance(classes, list) or not isinstance(scores, list):
+            raise ValueError("Invalid Vertex response shape")
+
         score_map = {cls.capitalize(): float(score) for cls, score in zip(classes, scores)}
 
         return {
             "Real": score_map.get("Real", 0.7),
-            "Fake": score_map.get("Fake", 0.3),
-            "Misleading": score_map.get("Misleading", 0.0)
+            "Fake": score_map.get("Fake", 0.2),
+            "Misleading": score_map.get("Misleading", 0.1)
         }
 
     except Exception as e:
-        print(f"[Vertex AI] ⚠️ Score extraction failed: {e}")
-        return {"Real": 0.7, "Fake": 0.3, "Misleading": 0.0}
+        print(f"[Vertex AI] ❌ Score extraction failed — Using fallback: {e}")
+        return {"Real": 0.7, "Fake": 0.2, "Misleading": 0.1}
 
 
 def clear_cache_for_text(text: str) -> bool:
@@ -403,89 +410,93 @@ def adjusted_ensemble(
     vertex_scores: dict,
     fact_check_status: str,
     corroboration_status: str,
-    evidence_count: int = 0,
+    evidence_strength: float = 0.0,
     threshold=0.15
 ) -> tuple[str, int]:
     """
-    ✅ New evidence-first ensemble logic.
-    Real-world corroboration > ML models.
+    Evidence-first ensemble logic.
+    Prioritizes real-world corroboration > model inference > ML scoring.
     """
 
+    # Normalize vertex scores
     C_real = vertex_scores.get("Real", 0.7)
     C_fake = vertex_scores.get("Fake", 0.3)
     C_mis = vertex_scores.get("Misleading", 0.0)
 
-    # ======================================================
-    # 1. Professional Fact-Checks OVERRIDE prediction
-    # ======================================================
+    # -------------------------------
+    # 1️⃣ Fact-check overrides
+    # -------------------------------
     if fact_check_status == "predominantly_false":
         return "Fake", min(97, gem_conf + 10)
 
     if fact_check_status == "predominantly_true":
-        boost = 5 if corroboration_status != "corroborated" else 12
-        return "Real", min(98, max(gem_conf, 85) + boost)
+        return "Real", min(98, max(gem_conf, 85) + 10)
 
     if fact_check_status == "mixed_ratings":
         return "Misleading", max(70, gem_conf)
 
-    if corroboration_status == "corroborated" and evidence_count >= 3:
-        override_conf = max(gem_conf, 88 + (evidence_count * 2))  # 3 evidences → 94%, 5 → 98%
-        return "Real", min(98, override_conf)
+    # -------------------------------
+    # 2️⃣ Dynamic weight blending
+    # -------------------------------
+    # Evidence dominates; Gemini adjusts; Vertex adds minor modulation
+    w_evidence = 0.6
+    w_gemini = 0.25
+    w_vertex = 0.15
 
-    # ======================================================
-    # 2. Vertex AI influence (reduced weight)
-    # ======================================================
-    strong_vertex_fake = C_fake > 0.45
+    # Convert Gemini’s text prediction to probability space
+    P_gem = {
+        "Real": 0.7 if gem_pred == "Real" else 0.15,
+        "Fake": 0.7 if gem_pred == "Fake" else 0.15,
+        "Misleading": 0.6 if gem_pred == "Misleading" else 0.1,
+    }
 
-    if strong_vertex_fake and corroboration_status != "corroborated":
-        # Vertex strongly detects fake AND no evidence supporting claim
-        return "Fake", max(70, int(C_fake * 100))
+    # Map evidence_strength (-ve → Fake, +ve → Real)
+    P_evidence_real = clamp01(0.5 + 0.5 * evidence_strength)  # [-1, +1] → [0, 1]
+    P_evidence_fake = 1.0 - P_evidence_real
 
-    # If vertex AI is mildly suspicious – DO NOT penalize if evidence exists
-    vertex_penalty = int(C_fake * 8) if corroboration_status == "no_results" else 0
+    # Weighted fusion
+    real_score = (
+        w_evidence * P_evidence_real +
+        w_gemini * P_gem["Real"] +
+        w_vertex * C_real
+    )
 
-    # ======================================================
-    # 3. Base confidence from Gemini (kept as is)
-    # ======================================================
-    base_conf = gem_conf - vertex_penalty
+    fake_score = (
+        w_evidence * P_evidence_fake +
+        w_gemini * P_gem["Fake"] +
+        w_vertex * C_fake
+    )
 
-    # ======================================================
-    # ✅ New Evidence Weighting (MUCH stronger)
-    # ======================================================
-    if corroboration_status == "corroborated":
-        if evidence_count >= 5:
-            evidence_boost = 25
-        elif evidence_count >= 3:
-            evidence_boost = 18
-        else:
-            evidence_boost = 10
+    mis_score = (
+        w_gemini * P_gem["Misleading"] +
+        w_vertex * C_mis * 0.8
+    )
+
+    # Normalize and choose final label
+    total = real_score + fake_score + mis_score
+    probs = {
+        "Real": real_score / total,
+        "Fake": fake_score / total,
+        "Misleading": mis_score / total
+    }
+
+    final_pred = max(probs, key=probs.get)
+    final_conf = int(min(100, (max(probs.values()) * 100)))
+
+    # -------------------------------
+    # 3️⃣ Adjust based on corroboration status
+    # -------------------------------
+    if corroboration_status == "corroborated" and evidence_strength > 0.4:
+        final_conf = min(100, final_conf + 10)
 
     elif corroboration_status == "weak":
-        evidence_boost = 0
-        base_conf = max(55, base_conf - 5)
+        final_conf = max(60, final_conf - 5)
 
-    else:  # "no_results"
-        evidence_boost = 0
-        base_conf = max(60, base_conf) 
+    elif corroboration_status == "no_results":
+        final_conf = max(55, final_conf - 10)
 
-    # ======================================================
-    # 4. Combine signals
-    # ======================================================
-    final_conf = min(100, base_conf + evidence_boost)
+    return final_pred, final_conf
 
-    # ======================================================
-    # 5. Final Prediction Rules
-    # ======================================================
-    if gem_pred == "Real":
-        return "Real", final_conf
-
-    if gem_pred == "Fake":
-        return "Fake", max(final_conf, 70 if corroboration_status == "no_results" else 60)
-
-    if gem_pred == "Misleading":
-        return "Misleading", max(final_conf, 60)
-
-    return gem_pred, max(50, final_conf)
 
 def load_credible_domains() -> List[str]:
     """
@@ -684,109 +695,143 @@ Text: {claim}
 
 
 async def corroborate_all_with_google_async(claims: List[str]) -> Dict[str, Any]:
-    """Corroborate claims with Google search - with validation."""
+
     evidences = []
     CREDIBLE_DOMAINS = load_credible_domains_cached()
     domain_updates: Dict[str, float] = {}
-    
-    # Extract keywords and summaries in parallel
+
     keyword_tasks = [extract_keywords(claim) for claim in claims]
     summary_tasks = [summarize_claim(claim) for claim in claims]
-    
+
     keywords_list = await asyncio.gather(*keyword_tasks)
     summaries_list = await asyncio.gather(*summary_tasks)
-    
-    # Build Google queries with validation
+
     async with aiohttp.ClientSession() as session:
         tasks = []
+
         for claim, kws, summary in zip(claims, keywords_list, summaries_list):
-            # Validate summary
+
+            # ----------- fallback if summary is garbage -----------
             if not summary or len(summary) < 10 or "{" in summary or "error" in summary.lower():
-                print(f"⚠️ Invalid summary, using claim: {claim[:60]}")
-                summary = claim[:100]
-            
-            # Build query
-            if kws and len(kws) > 0:
+                print(f"⚠️ Invalid summary, using original claim text instead")
+                summary = claim[:120]
+
+            # ----------- build google query -----------
+            if kws:
                 kw_str = " ".join(kws[:4])
-                # Only add keywords if not already in summary
-                if kw_str.lower() not in summary.lower():
-                    query = f"{summary} {kw_str}".strip()
-                else:
-                    query = summary
+                query = f"{summary} {kw_str}" if kw_str.lower() not in summary.lower() else summary
             else:
                 query = summary
-            
+
             print(f"🔍 Google query => {query[:80]}")
             tasks.append(fetch_google(session, query, num_results=10))
-        
+
         results_list = await asyncio.gather(*tasks)
-    
-    # Process results
+
     emb_cache = {}
+
     def get_emb(text):
         if text not in emb_cache:
             emb_cache[text] = get_embedding(text)
         return emb_cache[text]
-    
+
     for claim, items in zip(claims, results_list):
+
         if not items:
-            print(f"⚠️ No Google results for claim: {claim[:60]}")
+            print(f"⚠️ No results returned from Google for claim: {claim[:60]}")
             continue
-        
-        print(f"📰 Results retrieved: {len(items)}")
-        
-        claim_emb = get_emb(claim)
-        claim_evidences = []
-        
-        for it in items[:10]:
-            link = it.get("link", "")
-            snippet = html.unescape(it.get("snippet", "")).strip()[:400]
-            
-            # Validate snippet
+
+        articles = []
+        for it in items[:8]: 
+            snippet = html.unescape(it.get("snippet", "")).strip()
             if not snippet or len(snippet) < 20:
                 continue
-            
+
+            articles.append({
+                "title": it.get("title", "No title"),
+                "snippet": snippet[:350],
+                "link": it.get("link", "")
+            })
+
+        # ----------- Construct prompt for Gemini -----------
+        gem_prompt = f"""
+You evaluate whether news articles support a claim.
+
+CLAIM: "{claim}"
+
+ARTICLES:
+{json.dumps(articles, indent=2)}
+Also take into account the date of posting of the article dismiss the articles if another newer claim says the opposite of the older articles
+Return STRICT JSON ONLY:
+
+{{
+ "evaluated": [
+   {{
+     "title": "...",
+     "link": "...",
+     "relevance": "supports" | "contradicts"| "unrelated",
+     "confidence": 0-100
+   }}
+ ]
+}}
+"""
+
+        gem_resp = ask_gemini_structured(gem_prompt)
+        evaluated = gem_resp.get("parsed", {}).get("evaluated", []) if isinstance(gem_resp, dict) else []
+
+        claim_evidences = []
+
+        for result in evaluated:
+            relevance = result.get("relevance")
+            if relevance not in ["supports", "contradicts"]:
+                continue
+
+            link = result.get("link", "")
+            domain = urlparse(link).netloc.lower()
+            snippet = next((a["snippet"] for a in articles if a["link"] == link), "")
+
+            # Compute similarity with embedding
+            claim_emb = get_emb(claim)
             snippet_emb = get_emb(snippet)
             similarity = float(util.cos_sim(claim_emb, snippet_emb))
-            
-            domain = urlparse(link).netloc.lower()
-            score = domain_score_for_url(link)
-            
-            is_credible = domain in CREDIBLE_DOMAINS
-            threshold = 0.45 if is_credible else 0.50
-            
-            if similarity < threshold:
-                continue
-            
-            evidence_score = round(clamp01(0.75 * similarity + 0.25 * score), 3)
-            
+
+            # Domain score (credibility)
+            domain_score = domain_score_for_url(link)
+
+            # Weighted confidence (similarity + domain trust)
+            evidence_score = round(clamp01(0.75 * similarity + 0.25 * domain_score), 3)
+
             claim_evidences.append({
-                "title": it.get("title", "No title"),
+                "title": result.get("title"),
                 "link": link,
                 "snippet": snippet,
                 "similarity": round(similarity, 3),
-                "domain_score": score,
+                "domain_score": domain_score,
                 "evidence_score": evidence_score,
-                "is_new_domain": not is_credible
+                "is_new_domain": domain not in CREDIBLE_DOMAINS,
+                "relevance": relevance,
+                "confidence": result.get("confidence", 50)
             })
-            
+
+            # update trusted domains if high reliability
             if evidence_score > 0.7:
                 domain_updates[domain] = evidence_score
-        
-        # Add top 3 evidences per claim
+
+        # Keep top 3 strongest pieces of evidence
         top = sorted(claim_evidences, key=lambda x: x["evidence_score"], reverse=True)[:3]
         evidences.extend(top)
-    
-    # Update domain scores
+
+    # Update trusted domain score DB
     if domain_updates:
         await asyncio.to_thread(add_or_update_trusted_sources_batch, domain_updates)
-    
+
+    # Final status classification
     status = (
         "corroborated" if len(evidences) >= 2 else
         "weak" if evidences else
         "no_results"
     )
-    
+
     return {"status": status, "evidences": evidences}
 
 def extract_local_context(claim: str, full_text: str, window: int = 2) -> str:
@@ -969,18 +1014,24 @@ async def run_parallel_storage(text, score, label, explanation):
         return await asyncio.gather(firestore, pinecone)
 
 def detect_fake_text(text: str) -> dict:
+    import asyncio, time, math, re
+
     start_total = time.time()
     text = re.sub(r"(?<=[a-zA-Z])\.(?=[A-Z])", ". ", text)
 
+    # ----------------------------
+    # PHASE 1 – Fact check + metadata (parallel sync)
+    # ----------------------------
     async def run_parallel_phase1():
-        """Run Fact Check + Metadata Extraction concurrently"""
         loop = asyncio.get_running_loop()
         fact_check = loop.run_in_executor(None, query_google_fact_check_api, text)
         metadata = loop.run_in_executor(None, extract_metadata_with_gemini, text)
         return await asyncio.gather(fact_check, metadata)
 
+    # ----------------------------
+    # PHASE 2 – Vertex + Google corroboration (parallel async)
+    # ----------------------------
     async def run_parallel_phase2(metadata):
-        """Run Vertex AI + GOOGLE corroboration using ONE search instead of per-claim search"""
         claims = simple_sentence_split(metadata["text"])
         combined_query = " OR ".join(claims[:3])
 
@@ -993,16 +1044,29 @@ def detect_fake_text(text: str) -> dict:
         vertex_scores, corroboration_data = await asyncio.gather(vertex_task, corroboration_task)
         return vertex_scores, corroboration_data, claims
 
+    # ----------------------------
+    # PHASE 3 – Per-claim evaluation (weighted ensemble)
+    # ----------------------------
     async def run_parallel_claim_checks(claims, corroboration_data, fact_check_results, metadata, vertex_scores):
-        """Runs Gemini structured decision only if needed"""
-        loop = asyncio.get_running_loop()
 
-        async def process_claim_async(claim):
+        async def process_claim(claim):
+            loop = asyncio.get_running_loop()
             parsed = {}
 
+            # If nothing corroborates & no fact checks found → fallback "Unknown"
             if corroboration_data["status"] == "no_results" and fact_check_results["status"] == "no_fact_checks":
                 gem_pred, gem_conf = "Unknown", 60
-                evidence_count = 0
+                evidence_strength = 0
+
+                safe_vertex_scores = vertex_scores or {"Real": 0.7, "Fake": 0.2, "Misleading": 0.1}
+                final_pred, final_conf = adjusted_ensemble(
+                    gem_pred, gem_conf,
+                    safe_vertex_scores,
+                    fact_check_results.get("status", "no_fact_checks"),
+                    corroboration_data.get("status", "no_results"),
+                    evidence_strength
+                )
+
             else:
                 gem_resp = await loop.run_in_executor(
                     None,
@@ -1016,88 +1080,100 @@ def detect_fake_text(text: str) -> dict:
                         )
                     )
                 )
+
                 parsed = gem_resp.get("parsed", {}) or {}
                 gem_pred = parsed.get("prediction", "Unknown")
                 gem_conf = int(parsed.get("confidence", 70))
 
-                evidence_count = len([
-                    e for e in corroboration_data.get("evidences", [])
-                    if e.get("evidence_score", 0) > 0.6
-                ])
+                # ✅ Weighted evidence score (support - contradict)
+                supports = sum((e.get("confidence", 50) / 100.0)
+                               for e in corroboration_data.get("evidences", [])
+                               if e.get("relevance") == "supports")
 
-            final_pred, final_conf = adjusted_ensemble(
-                gem_pred, gem_conf, vertex_scores,
-                fact_check_results.get("status", "no_fact_checks"),
-                corroboration_data.get("status", "no_results"),
-                evidence_count
-            )
+                contradicts = sum((e.get("confidence", 50) / 100.0)
+                                  for e in corroboration_data.get("evidences", [])
+                                  if e.get("relevance") == "contradicts")
 
-            gem_expl = parsed.get("explanation") if isinstance(parsed, dict) else None
-            explanation = (
-                gem_expl.strip()
-                if gem_expl and isinstance(gem_expl, str) and gem_expl.strip()
-                else f"{final_pred}: {final_conf}% — {evidence_count} evidence(s), fact-checks: {fact_check_results.get('status')}"
-            )
+                evidence_strength = round(supports - contradicts, 3)
 
-            result_obj = {
+                safe_vertex_scores = vertex_scores or {"Real": 0.7, "Fake": 0.2, "Misleading": 0.1}
+                final_pred, final_conf = adjusted_ensemble(
+                    gem_pred, gem_conf, safe_vertex_scores,
+                    fact_check_results.get("status", "no_fact_checks"),
+                    corroboration_data.get("status", "no_results"),
+                    evidence_strength
+                )
+
+            explanation = parsed.get("explanation")
+            if not explanation or "{" in explanation:
+                explanation = f"{final_pred}: {final_conf}% | evidence={evidence_strength}"
+
+            return {
                 "claim_text": claim,
                 "gemini": {"prediction": gem_pred, "confidence": gem_conf},
                 "vertex_ai": vertex_scores,
                 "fact_check": fact_check_results,
                 "corroboration": corroboration_data,
-                "ensemble": {
-                    "final_prediction": final_pred,
-                    "final_confidence": final_conf,
-                    "combined_score": round(final_conf / 100, 3),
-                },
+                "ensemble": {"final_prediction": final_pred, "final_confidence": final_conf},
                 "explanation": explanation,
-                "evidence": corroboration_data.get("evidences", []),
-                "evidence_count": evidence_count,
+                "evidence_strength": evidence_strength
             }
 
-            return result_obj, final_conf, final_pred, explanation
+        return await asyncio.gather(*[process_claim(c) for c in claims])
 
-        return await asyncio.gather(*[process_claim_async(c) for c in claims])
-
+    # ----------------------------
+    # FULL PIPELINE EXECUTION
+    # ----------------------------
     async def main():
-        # ✅ PHASE 1 — Fact check + metadata
         fact_check_results, metadata = await run_parallel_phase1()
-
-        # ✅ PHASE 2 — Vertex + Google corroboration
         vertex_scores, corroboration_data, claims = await run_parallel_phase2(metadata)
 
-        # ✅ PHASE 3 — Claim-level analysis
-        results_raw = await run_parallel_claim_checks(
+        results = await run_parallel_claim_checks(
             claims, corroboration_data, fact_check_results, metadata, vertex_scores
         )
 
-        results, confs, preds, exps = [], [], [], []
-        for res, conf, pred, explanation in results_raw:
-            results.append(res)
-            confs.append(conf)
-            preds.append(pred)
-            exps.append(explanation)
+        label_stats = {}
+        for r in results:
+            lbl = r["ensemble"]["final_prediction"]
+            conf = r["ensemble"]["final_confidence"]
 
-        # ✅ PHASE 4 — Combine outputs
-        overall_conf = int(sum(confs) / max(1, len(confs)))
-        overall_label = max(set(preds), key=preds.count) if preds else "Unknown"
-        combined_explanation = " | ".join(exps[:3])
+            if lbl not in label_stats:
+                label_stats[lbl] = {"sum_conf": 0.0, "count": 0}
 
-        # Domain credibility bonus
-        domain = domain_from_url(metadata.get("source", ""))
-        overall_conf = min(100, overall_conf + int(overall_conf * get_domain_bonus(domain)))
+            label_stats[lbl]["sum_conf"] += conf
+            label_stats[lbl]["count"] += 1
 
-        result = {
-            "score": overall_conf,
-            "prediction": overall_label,
-            "explanation": combined_explanation,
-        }
+        # --------------------------
+        # Step 1: majority vote
+        # --------------------------
+        majority_label = max(label_stats.items(), key=lambda x: x[1]["count"])[0]
+        majority_count = label_stats[majority_label]["count"]
 
-        # ✅ PHASE 5 — Parallel write (Pinecone + Firestore)
+        # If majority label appears more than 50%, use it directly
+        if majority_count > len(results) / 2:
+            overall_label = majority_label
+        else:
+            # otherwise: tie or fragmented → use highest avg confidence ONLY as tie breaker
+            overall_label = max(label_stats.items(), key=lambda x: x[1]["sum_conf"] / x[1]["count"])[0]
+
+        # final confidence = average confidence of selected label
+        chosen = label_stats[overall_label]
+        avg_conf = chosen["sum_conf"] / chosen["count"]
+
+        # Reduce confidence inflation from single outliers
+        overall_conf = int(min(100, avg_conf * (0.65 + 0.35 * math.log1p(chosen["count"]))))
+
+
+        combined_explanation = " | ".join(r["explanation"] for r in results[:3])
+
         await run_parallel_storage(text, overall_conf, overall_label, combined_explanation)
 
         return {
-            "summary": result,
+            "summary": {
+                "score": overall_conf,
+                "prediction": overall_label,
+                "explanation": combined_explanation,
+            },
             "runtime": round(time.time() - start_total, 2),
             "claims_checked": len(results),
             "raw_details": results

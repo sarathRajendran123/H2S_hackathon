@@ -16,6 +16,7 @@ import uuid
 import queue
 import json
 import threading
+from translate import translate_to_english
 
 load_dotenv()
 
@@ -176,7 +177,19 @@ def detect_text():
         print(f"User selected text: '{original_text}' - \n")
         print(f"URL IS  '{url}'- \n")
 
-        text = original_text.strip()
+                # Translate to English if needed
+        try:
+            translation_result = translate_to_english(original_text)
+            text_for_analysis = translation_result['translated_text']
+            detected_language = translation_result['detected_language']
+            was_translated = translation_result['was_translated']
+    
+        except Exception as e:
+            print(f"Translation error: {e}")
+            return jsonify({"error": "Failed to translate text. Please try again."}), 500
+        
+        text = text_for_analysis.strip()
+        print(f'Translated text ' , text)
         if not text or len(text) < 5:
             return jsonify({"error": "Text too short or missing"}), 400
 
