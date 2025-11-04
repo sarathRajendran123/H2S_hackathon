@@ -1,39 +1,32 @@
 import hashlib
 import re
 from google.cloud import firestore
-import firebase_admin
-from firebase_admin import credentials, firestore
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 import os
 import json
 from typing import Optional
-from sentence_transformers import util, SentenceTransformer
+from sentence_transformers import util
+import google.auth
+from google.cloud import firestore
 
-load_dotenv()
+db = firestore.Client(project='gen-ai-h2s-project')
 
-cred_path = os.getenv("FIRESTORE_CREDENTIALS_PATH")
-fallback_path = os.getenv("FIREBASE_KEY_PATH")
+credentials, project_id = google.auth.default()
 
-if not cred_path or not os.path.exists(cred_path):
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    fallback_path = os.path.join(script_dir, fallback_path)
-    if os.path.exists(fallback_path):
-        cred_path = fallback_path
-        print(f"⚠️ Using fallback Firebase key: {cred_path}")
-    else:
-        raise FileNotFoundError(
-            "❌ Firebase credentials not found. "
-            "Set FIRESTORE_CREDENTIALS_PATH or place firebase-key.json next to this file."
-        )
+EMBED_MODEL = None
 
-if not firebase_admin._apps:
-    cred = credentials.Certificate(cred_path)
-    firebase_admin.initialize_app(cred)
-db = firestore.client(database_id="genai")
-print("✅ Firestore initialized successfully.")
+def get_embed_model():
+    global EMBED_MODEL
+    if EMBED_MODEL is None:
+        from sentence_transformers import SentenceTransformer
+        EMBED_MODEL = SentenceTransformer("./models/all-MiniLM-L6-v2")
+    return EMBED_MODEL
 
-EMBED_MODEL = SentenceTransformer("all-MiniLM-L6-v2")
+def generate_embedding(text: str) -> list:
+    normalized = text.lower().strip()
+    model = get_embed_model()
+    return model.encode(normalized).tolist()
 
 def generate_id(url, text):
     content = (url + text).encode("utf-8")
@@ -49,10 +42,6 @@ def generate_normalized_id(url: str, text: str) -> str:
     norm_text = normalize_text(text)
     content = (norm_url + norm_text).encode("utf-8")
     return hashlib.sha256(content).hexdigest()
-
-def generate_embedding(text: str) -> list:
-    normalized = text.lower().strip()
-    return EMBED_MODEL.encode(normalized).tolist()
 
 def get_article_doc(article_id):
     doc_ref = db.collection("articles").document(article_id)

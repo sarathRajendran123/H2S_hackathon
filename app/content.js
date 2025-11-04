@@ -20,9 +20,9 @@ function cancelSession() {
     { type: 'application/json' }
   );
   
-  const sent = navigator.sendBeacon('http://localhost:5000/cancel_session', blob);
+  const sent = navigator.sendBeacon('https://misinfo-backend-804712050799.us-central1.run.app/cancel_session', blob);
   if (!sent) {
-    fetch('http://localhost:5000/cancel_session', {
+    fetch('https://misinfo-backend-804712050799.us-central1.run.app/cancel_session', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -249,6 +249,11 @@ if (typeof chrome !== 'undefined' && chrome.runtime) {
     }
   });
 }
+
+marked.setOptions({
+  mangle: false,
+  headerIds: false
+});
 
 function normalizeScore(raw) {
   let s = raw || 0;
@@ -500,7 +505,8 @@ window.addEventListener('analyze-image', (event) => {
             <div style="font-weight: 700; color: ${verdictColor};">${result.score}%</div>
           </div>
           <div style="font-size: 13px; color: #64748b; line-height: 1.5;">
-            ${result.explanation}
+            ${marked.parse(result.explanation)}
+
           </div>
           <div style="margin-top: 8px; font-size: 12px; color: #94a3b8;">
             <a href="${imageUrl}" target="_blank" style="color: #667eea; text-decoration: none;">View original image →</a>
@@ -1674,7 +1680,7 @@ chrome.runtime.onMessage.addListener(message => {
       ">
         <div style="font-size: 13px; color: #475569; line-height: 1.6;">
           <strong style="color:#334155; font-weight:600;">Analysis Summary</strong><br>
-          ${explanation || "No explanation available."}
+          ${marked.parse(explanation) || "No explanation available."}
         </div>
       </div>
 

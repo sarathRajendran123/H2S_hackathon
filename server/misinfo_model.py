@@ -8,12 +8,12 @@ from functools import lru_cache
 from typing import List, Dict, Any
 from urllib.parse import urlparse
 from dotenv import load_dotenv
-from sentence_transformers import SentenceTransformer, util
+from sentence_transformers import util
 import google.generativeai as genai
-from google.oauth2 import service_account
 from google.auth.transport.requests import Request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import hashlib
+import google.auth
 
 from database import db
 from vectorDb import (
@@ -25,49 +25,57 @@ from datetime import datetime, timedelta
 import aiohttp
 import asyncio
 
-#----------------- Gemini config ----------------
+# ----------------- Gemini config ----------------
 load_dotenv()
+
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 if not GEMINI_API_KEY:
     raise ValueError("❌ Missing GEMINI_API_KEY in environment variables")
-genai.configure(api_key=GEMINI_API_KEY)
-GEM_MODEL = genai.GenerativeModel("gemini-2.5-flash")
+
+GEM_MODEL = None
+
+def get_gemini_model():
+    global GEM_MODEL
+    if GEM_MODEL is None:
+        genai.configure(api_key=GEMINI_API_KEY)
+        GEM_MODEL = genai.GenerativeModel("gemini-2.5-flash")
+    return GEM_MODEL
 
 # ---------------- Vertex AI config ----------------
 PROJECT_ID = os.getenv("PROJECT_ID")
 ENDPOINT_ID = os.getenv("TEXT_ENDPOINT_ID")
 REGION = os.getenv("LOCATION", "us-central1")
-PREDICT_URL = f"https://{REGION}-aiplatform.googleapis.com/v1/projects/{PROJECT_ID}/locations/{REGION}/endpoints/{ENDPOINT_ID}:predict"
-SERVICE_ACCOUNT_PATH = os.getenv("SERVICE_ACCOUNT_PATH")
-GOOGLE_KEY = os.getenv("GOOGLE_API_KEY")
-CX_ID = os.getenv("GOOGLE_SEARCH_CX")
-FACT_CHECK_API_KEY = os.getenv("GEMINI_API_KEY")
 
-# ---------------- GCP credentials (for Vertex AI) ----------------
-def get_gcp_credentials():
-    """
-    Load and refresh service account credentials for GCP (usable by Vertex AI).
-    """
-    creds = service_account.Credentials.from_service_account_file(
-        SERVICE_ACCOUNT_PATH,
-        scopes=["https://www.googleapis.com/auth/cloud-platform"]
-    )
-    creds.refresh(Request())
-    return creds
+PREDICT_URL = f"https://{REGION}-aiplatform.googleapis.com/v1/projects/{PROJECT_ID}/locations/{REGION}/endpoints/{ENDPOINT_ID}:predict"
+
+GOOGLE_KEY = os.getenv("GOOGLE_API_KEY")    
+CX_ID = os.getenv("GOOGLE_SEARCH_CX")
+FACT_CHECK_API_KEY = os.getenv("GEMINI_API_KEY") 
 
 def get_access_token():
-    creds = get_gcp_credentials()
+
+    creds, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
+    creds.refresh(Request())
     return creds.token
 
-# ---------------- Embeddings ----------------
-embedder = SentenceTransformer("all-MiniLM-L6-v2")
 
-@lru_cache(maxsize=8192)  
+# ---------------- Embeddings ----------------
+embedder = None
+
+def get_embedder():
+    global embedder
+    if embedder is None:
+        from sentence_transformers import SentenceTransformer
+        embedder = SentenceTransformer("./models/all-MiniLM-L6-v2")
+    return embedder
+
+@lru_cache(maxsize=8192)
 def get_embedding(text: str):
-    return embedder.encode(text, convert_to_tensor=True)
+    model = get_embedder()
+    return model.encode(text, convert_to_tensor=True)
+
 
 # ---------------- Constants ----------------
-
 CLAIM_MIN_LEN = 30
 MAX_SEARCH_RESULTS = 5
 EMB_SIM_THRESHOLD = 0.40
@@ -164,7 +172,7 @@ def add_or_update_trusted_sources_batch(domain_scores: Dict[str, float]):
 @retry
 def ask_gemini_structured(prompt: str) -> Dict[str, Any]:
     try:
-        resp = GEM_MODEL.generate_content(prompt)
+        resp = get_gemini_model().generate_content(prompt)
         text = ""
         try:
             text = resp.candidates[0].content.parts[0].text.strip()
@@ -931,7 +939,7 @@ def quick_initial_assessment(text: str) -> dict:
     """
 
     try:
-        resp = GEM_MODEL.generate_content(prompt)
+        resp = get_gemini_model().generate_content(prompt)
         return {
             "status": "ok",
             "initial_analysis": resp.text.strip(),
@@ -959,6 +967,7 @@ def run_storage(text, score, label, explanation):
                 "gemini_reasoning": explanation,
                 "text_explanation": explanation,
                 "last_updated": datetime.utcnow(),
+                "expireAt": datetime.utcnow() + timedelta(days=10),
                 "type": "text"
             }, merge=True)
 
@@ -1151,5 +1160,8 @@ def detect_fake_text(text: str) -> dict:
             "claims_checked": len(results),
             "raw_details": results
         }
+
+    import nest_asyncio
+    nest_asyncio.apply()
 
     return asyncio.run(main())

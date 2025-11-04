@@ -9,7 +9,7 @@ import os
 from typing import Optional
 
 # -----------------------------
-# CONFIGURATION & SETUP
+# CONFIGURATION & GLOBALS
 # -----------------------------
 load_dotenv()
 
@@ -17,49 +17,83 @@ PINECONE_API_KEY = os.getenv("PINECONE_API")
 INDEX_NAME = "fact-check-cache"
 NAMESPACE = "default"
 VERIFIED_NAMESPACE = "verified_fakes"
-EMBED_MODEL = SentenceTransformer("all-MiniLM-L6-v2")
 
-pc = Pinecone(api_key=PINECONE_API_KEY)
-existing_indexes = [i["name"] for i in pc.list_indexes()]
-if INDEX_NAME not in existing_indexes:
-    pc.create_index(
-        name=INDEX_NAME,
-        dimension=384,
-        metric="cosine",
-        spec=ServerlessSpec(cloud="aws", region="us-east-1")
-    )
-index = pc.Index(INDEX_NAME)
+# Lazy-loaded globals
+EMBED_MODEL = None
+pc = None
+index = None
+
 
 # -----------------------------
-# HELPER FUNCTIONS
+# LAZY LOADERS
 # -----------------------------
+def get_embed_model():
+    """Lazy load the MiniLM embedding model AFTER app startup."""
+    global EMBED_MODEL
+    if EMBED_MODEL is None:
+        print("🔹 Loading MiniLM embedder (lazy load)...")
+        EMBED_MODEL = SentenceTransformer("./models/all-MiniLM-L6-v2")
+        print("✅ MiniLM Loaded")
+    return EMBED_MODEL
+
+
+def init_pinecone():
+    """Lazy init Pinecone to avoid Cloud Run cold start failures."""
+    global pc, index
+
+    if pc is None:
+        if not PINECONE_API_KEY:
+            raise RuntimeError("❌ Missing env var: PINECONE_API")
+
+        print("🔹 Initializing Pinecone client...")
+        pc = Pinecone(api_key=PINECONE_API_KEY)
+
+    if index is None:
+        print("🔹 Checking Pinecone index...")
+        existing = [i["name"] for i in pc.list_indexes()]  # <== moved inside init
+
+        if INDEX_NAME not in existing:
+            print(f"🟢 Creating Pinecone index '{INDEX_NAME}'...")
+            pc.create_index(
+                name=INDEX_NAME,
+                dimension=384,
+                metric="cosine",
+                spec=ServerlessSpec(cloud="aws", region="us-east-1"),
+            )
+
+        index = pc.Index(INDEX_NAME)
+        print(f"✅ Connected to Pinecone index '{INDEX_NAME}'")
+
+    return index
+
+
+# -----------------------------
+# HELPERS
+# -----------------------------
+def embed_text(text: str) -> list:
+    model = get_embed_model()
+    normalized = text.lower().strip()
+    return model.encode(normalized).tolist()
+
+
 def anon_user_id(fingerprint: str) -> str:
-    """Generate anonymous user ID from fingerprint."""
     digest = hashes.Hash(hashes.SHA256(), backend=default_backend())
     digest.update(fingerprint.encode())
     return digest.finalize().hex()[:16]
 
 
-def embed_text(text: str) -> list:
-    """Convert text to normalized vector embedding."""
-    normalized = text.lower().strip()
-    return EMBED_MODEL.encode(normalized).tolist()
-
-
 def text_hash(text: str, url: Optional[str] = None) -> str:
-    """Generate deterministic hash for text (optionally with URL)."""
-    content = (url or "") + text
-    return hashlib.sha256(content.encode()).hexdigest()
+    return hashlib.sha256(((url or "") + text).encode()).hexdigest()
 
 
 # -----------------------------
 # SEARCH FUNCTIONS
 # -----------------------------
 def search_feedback(text: str, article_id: Optional[str] = None) -> dict:
-    """Search Pinecone for exact or similar text feedback."""
     if not text.strip():
         return {"error": "No text provided"}
 
+    index = init_pinecone()
     vec_id = article_id or text_hash(text)
     vector = embed_text(text)
 
@@ -105,13 +139,14 @@ def search_feedback(text: str, article_id: Optional[str] = None) -> dict:
 def search_feedback_semantic(
     text: str, article_id: Optional[str] = None, verified_only: bool = False
 ) -> dict:
-    """Semantic search in Pinecone, optionally only verified fakes."""
     if not text.strip():
         return {"error": "No text provided"}
 
+    index = init_pinecone()
     vector = embed_text(text)
     namespace = VERIFIED_NAMESPACE if verified_only else NAMESPACE
     query_filter = {"verified": {"$eq": True}} if not verified_only else {}
+
     if article_id:
         query_filter["article_id"] = {"$eq": article_id}
 
@@ -124,16 +159,14 @@ def search_feedback_semantic(
     )
 
     if similar_results.matches:
-        top_matches = [f"{m.score:.3f}" for m in similar_results.matches[:3]]
-        print(f"[Pinecone] Top scores: {top_matches}")
-        best_match = max(
+        best = max(
             (m for m in similar_results.matches if m.score > 0.75),
             key=lambda m: m.score,
             default=None,
         )
-        if best_match:
-            metadata = best_match.metadata
-            print(f"[Pinecone Hit] Similarity: {best_match.score:.3f}")
+
+        if best:
+            metadata = best.metadata
             return {
                 "score": metadata.get("score", 0.5),
                 "explanation": metadata.get("explanation", ""),
@@ -141,12 +174,16 @@ def search_feedback_semantic(
                 "text": metadata.get("text", text),
                 "article_id": metadata.get("article_id"),
                 "source": "cache",
-                "similarity": best_match.score,
+                "similarity": best.score,
                 "details": [{"prediction": metadata.get("prediction", "Unknown")}],
             }
 
     return {"status": "no_reliable_match"}
 
+
+# -----------------------------
+# STORE USER FEEDBACK
+# -----------------------------
 def store_feedback(
     text: str,
     explanation: str,
@@ -157,17 +194,18 @@ def store_feedback(
     prediction: str = "Unknown",
     verified: bool = True,
 ) -> dict:
-    """Store or update a feedback vector with model or user data."""
     if not text.strip() or not explanation:
         return {"error": "Missing text or explanation"}
 
+    index = init_pinecone()
     vector = embed_text(text)
-    vec_id = article_id or text_hash(text, url="")
+    vec_id = article_id or text_hash(text)
     anon_id = anon_user_id(user_fingerprint)
     timestamp = datetime.utcnow().isoformat()
     namespace = VERIFIED_NAMESPACE if verified else NAMESPACE
 
     existing = index.fetch(ids=[vec_id], namespace=namespace)
+
     metadata = {
         "article_id": article_id or vec_id,
         "text_hash": vec_id,
@@ -185,62 +223,45 @@ def store_feedback(
     }
 
     if existing.vectors:
-        old_meta = existing.vectors[vec_id].metadata
-        old_confirmations = old_meta.get("confirmations", 0) + 1
-        old_users = old_meta.get("unique_users", [])
-        if anon_id not in old_users:
-            old_users.append(anon_id)
-        unique_count = len(old_users)
-
-        new_score = (
-            (old_meta.get("score", 0.5) * old_confirmations + score)
-            / (old_confirmations + 1)
-        )
+        old = existing.vectors[vec_id].metadata
         metadata.update({
-            "text": old_meta.get("text", text[:1000]),
-            "score": new_score,
-            "prediction": (
-                prediction if prediction != "Unknown"
-                else old_meta.get("prediction", "Unknown")
-            ),
-            "verified": verified or old_meta.get("verified", False),
-            "confirmations": old_confirmations,
-            "unique_users": old_users,
-            "unique_user_count": unique_count,
-            "last_updated": timestamp,
+            "score": (old.get("score", 0.5) + score) / 2,
+            "confirmations": old.get("confirmations", 0) + 1,
+            "unique_users": list(set(old.get("unique_users", []) + [anon_id])),
+            "unique_user_count": len(list(set(old.get("unique_users", []) + [anon_id]))),
+            "prediction": prediction if prediction != "Unknown" else old.get("prediction"),
+            "verified": verified or old.get("verified", False),
         })
-
-        index.upsert(
-            vectors=[{"id": vec_id, "values": vector, "metadata": metadata}],
-            namespace=namespace,
-        )
-        return {"status": "updated", "unique_user_count": unique_count}
 
     index.upsert(
         vectors=[{"id": vec_id, "values": vector, "metadata": metadata}],
         namespace=namespace,
     )
-    return {"status": "stored", "confirmations": 1, "article_id": article_id}
+    return {"status": "stored", "article_id": article_id}
 
+
+# -----------------------------
+# CLEANUP EXPIRED VECTORS
+# -----------------------------
 def cleanup_expired(days: int = 15) -> dict:
-    """Delete vectors older than N days (default: 15)."""
+    index = init_pinecone()
     now = datetime.utcnow()
     deleted_total = 0
 
     for ns in [NAMESPACE, VERIFIED_NAMESPACE]:
         try:
-            expired_results = index.query(
+            results = index.query(
                 vector=[0] * 384,
                 top_k=1000,
                 include_metadata=True,
                 filter={"ttl_expiry": {"$lt": now.isoformat()}},
                 namespace=ns,
             )
-            expired_ids = [m.id for m in expired_results.matches]
-            if expired_ids:
-                index.delete(ids=expired_ids, namespace=ns)
-                deleted_total += len(expired_ids)
-                print(f"[Cleanup] Deleted {len(expired_ids)} expired from {ns}")
+            expired = [m.id for m in results.matches]
+            if expired:
+                index.delete(ids=expired, namespace=ns)
+                deleted_total += len(expired)
+                print(f"[Cleanup] Deleted {len(expired)} expired vectors from {ns}")
         except Exception as e:
             print(f"[Cleanup Error in {ns}] {e}")
 

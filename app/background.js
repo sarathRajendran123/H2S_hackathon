@@ -1,7 +1,7 @@
 // ---------------------------
 // Config
 // ---------------------------
-const BACKEND_BASE = "http://127.0.0.1:5000";
+const BACKEND_BASE = "https://misinfo-backend-804712050799.us-central1.run.app";
 const TIMEOUT_MS = 120000;
 
 // ---------------------------

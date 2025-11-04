@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "TrustMeter - Page Text Trust Estimator",
   "version": "1.0",
-  "description": "Extracts visible text from the current view and asks an LLM how trustworthy it is, showing a trust score in the corner.",
+  "description": "AI-powered fact-checking on any webpage—instantly evaluates claims, images, and text to detect misinformation and provide a trust score.",
   "permissions": [
     "activeTab",
     "scripting",
@@ -22,22 +22,48 @@
   
   "content_scripts": [
     {
-      "matches": [
-        "http://*/*",
-        "https://*/*"
-      ],
+      "matches": ["https://*/*", "http://*/*"],
+
       "exclude_matches": [
-        "*://google.com/*",
-        "*://www.google.com/*",
         "*://*.google.com/*",
-        "*://*.google.co.in/*",
-        "*://*.google.co.uk/*",
+        "*://*.google.co.*/*",
         "*://*.bing.com/*",
         "*://*.duckduckgo.com/*",
         "*://*.search.brave.com/*",
-        "*://*.yahoo.com/*"
+        "*://*.yahoo.com/*",
+
+        "*://docs.google.com/*",
+        "*://drive.google.com/*",
+        "*://forms.google.com/*",
+        "*://notion.so/*",
+        "*://*.notion.site/*",
+        "*://www.notion.so/*",
+        "*://www.office.com/*",
+        "*://*.live.com/*",
+        "*://figma.com/*",
+
+        "*://mail.google.com/*",
+        "*://outlook.live.com/*",
+        "*://mail.yahoo.com/*",
+
+        "*://*.paypal.com/*",
+        "*://*.stripe.com/*",
+        "*://*.razorpay.com/*",
+        "*://*.paytm.com/*",
+        "*://*.amazon.in/gp/buy/*",
+        "*://*.bank*/*",
+
+        "*://accounts.google.com/*",
+        "*://login.*/*",
+        "*://auth.*/*",
+
+        "*://github.com/*",
+        "*://gitlab.com/*",
+        "*://stackblitz.com/*",
+        "*://codesandbox.io/*"
       ],
-      "js": ["content.js", "libs/Readability.js"],
+
+      "js": ["libs/Readability.js", "libs/marked.min.js", "content.js"],
       "run_at": "document_idle",
       "all_frames": false
     }

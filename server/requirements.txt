@@ -23,3 +23,6 @@ aiohttp
 requests
 Flask-Limiter
 google-cloud-translate
+flask-cors
+gunicorn
+nest_asyncio

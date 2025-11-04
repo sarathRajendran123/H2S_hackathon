@@ -1,26 +1,43 @@
 from google.cloud import translate
-import os
 from dotenv import load_dotenv
+import os
 
 load_dotenv()
 
-key_path = os.getenv("SERVICE_ACCOUNT_PATH", "gen-ai-h2s-project-562ce7c50fcf-vertex-ai.json")
-os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = key_path
+PROJECT_ID = os.getenv("PROJECT_ID")
+
+_translate_client = None
+
+def get_translate_client():
+    """Lazy load Translation client (avoids creating new GRPC connection per request)."""
+    global _translate_client
+    if _translate_client is None:
+        print("🔹 Initializing Google Translate client...")
+        _translate_client = translate.TranslationServiceClient()
+        print("✅ Google Translate client ready")
+    return _translate_client
+
 
 def translate_to_english(text_to_check: str) -> dict:
-    client = translate.TranslationServiceClient()
+    if not text_to_check or not text_to_check.strip():
+        return {
+            "original_text": "",
+            "translated_text": "",
+            "detected_language": "unknown",
+            "was_translated": False
+        }
 
-    project_id = os.getenv("PROJECT_ID", "gen-ai-h2s-project-562ce7c50fcf")
-    parent = f"projects/{project_id}/locations/global"
+    client = get_translate_client() 
+    parent = f"projects/{PROJECT_ID}/locations/global"
 
-    # Detect language
+    # Detect language (Google auto-detect)
     detection = client.detect_language(
         content=text_to_check,
         parent=parent
     )
     detected_lang = detection.languages[0].language_code
 
-    # If already English
+    # Already English → return as-is
     if detected_lang == "en":
         return {
             "original_text": text_to_check,
@@ -29,18 +46,16 @@ def translate_to_english(text_to_check: str) -> dict:
             "was_translated": False
         }
 
-    # Translate to English
+    # Translate into English
     response = client.translate_text(
         contents=[text_to_check],
         target_language_code="en",
         parent=parent
     )
 
-    translated_text = response.translations[0].translated_text
-
     return {
         "original_text": text_to_check,
         "detected_language": detected_lang,
-        "translated_text": translated_text,
+        "translated_text": response.translations[0].translated_text,
         "was_translated": True
     }

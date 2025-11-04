@@ -22,8 +22,19 @@ load_dotenv()
 
 app = Flask(__name__)
 app.secret_key = os.getenv("APP_SECRET_KEY")
-CORS(app, supports_credentials=True)
+CORS(app,
+     resources={r"/*": {"origins": "*"}},
+     supports_credentials=True,
+     allow_headers=["Content-Type", "Authorization", "X-Session-ID", "user-fingerprint"],
+     methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"])
 
+@app.after_request
+def add_cors_headers(response):
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, X-Session-ID, user-fingerprint"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
+    response.headers["Access-Control-Allow-Credentials"] = "true"
+    return response
 
 # ---------------------------
 # RATE LIMITER SETUP
@@ -99,6 +110,10 @@ def cleanup_log_queue(session_id):
     """Remove log queue for session"""
     with log_queues_lock:
         log_queues.pop(session_id, None)
+
+@app.get("/health")
+def health():
+    return {"status": "ok"}
 
 @app.route("/stream_logs/<session_id>", methods=["GET"])
 @limiter.exempt
@@ -191,7 +206,7 @@ def detect_text():
         article_id = generate_id(url, text)
         norm_id = generate_normalized_id(url, text)
 
-        # ✅ Firestore exact match
+        # Firestore exact match
         cached = get_article_doc(article_id)
         if cached:
             return jsonify({
@@ -210,7 +225,7 @@ def detect_text():
                 }]
             })
 
-        # ✅ Firestore semantic search
+        # Firestore semantic search
         firestore_semantic = firestore_semantic_search(original_text)
         if firestore_semantic:
             best = firestore_semantic["best"]
@@ -424,4 +439,4 @@ def health_check():
 
 
 if __name__ == "__main__":
-    app.run(port=5000, debug=True)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))

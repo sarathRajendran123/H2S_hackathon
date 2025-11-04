@@ -7,6 +7,8 @@ from google.cloud import vision
 from google.api_core.exceptions import GoogleAPICallError, RetryError
 from dotenv import load_dotenv
 import google.generativeai as genai
+import google.auth 
+from google.auth.transport.requests import Request  
 import re
 
 load_dotenv()
@@ -15,10 +17,24 @@ load_dotenv()
 PROJECT_ID = os.getenv("PROJECT_ID")
 ENDPOINT_ID = os.getenv("IMG_ENDPOINT_ID")
 LOCATION = os.getenv("LOCATION", "us-central1")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-client = vision.ImageAnnotatorClient()
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 genai.configure(api_key=GEMINI_API_KEY)
+
+# ✅ Use Cloud Run / Cloud Function credentials
+credentials, project_id = google.auth.default(
+    scopes=["https://www.googleapis.com/auth/cloud-platform"]
+)
+
+client = vision.ImageAnnotatorClient(credentials=credentials)
+
+
+# ------------------------- Access Token Helper -------------------------
+def _get_access_token() -> str:
+    """Returns OAuth token using Cloud Run service identity."""
+    creds, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
+    creds.refresh(Request())
+    return creds.token
 
 
 # ------------------------- Helper Functions -------------------------
@@ -43,7 +59,7 @@ def _safe_vision_call(func, image: vision.Image, retries=2):
     for attempt in range(retries + 1):
         try:
             return func(image=image)
-        except (GoogleAPICallError, RetryError) as e:
+        except (GoogleAPICallError, RetryError):
             if attempt == retries:
                 raise
             print(f"[Warning] API call failed. Retrying ({attempt+1}/{retries})...")
@@ -92,13 +108,11 @@ def analyze_image(path_or_url: str) -> Dict[str, Any]:
 
     image = _read_image(path)
 
-    results = {
+    return {
         "labels": detect_labels(image),
         "faces": detect_faces(image),
         "web": detect_web_entities(image),
     }
-
-    return results
 
 
 # ------------------------- Vertex AI Prediction -------------------------
@@ -117,13 +131,16 @@ def call_vertex_ai_prediction(image_path: str) -> Dict[str, Any]:
         f"projects/{PROJECT_ID}/locations/{LOCATION}/endpoints/{ENDPOINT_ID}:predict"
     )
 
-    token = os.popen("gcloud auth print-access-token").read().strip()
+    # ✅ FIX: No gcloud command — use programmatic token
+    token = _get_access_token()
+
     headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
     }
 
     resp = requests.post(url, headers=headers, json=data)
+
     try:
         result = resp.json()
         predictions = result.get("predictions", [{}])[0]
@@ -139,15 +156,12 @@ def call_gemini_detection(image_path: str) -> Dict[str, Any]:
         model = genai.GenerativeModel('gemini-2.5-flash')
 
         prompt = """
-        Analyze the provided image to determine if it is likely AI-generated or real/authentic.
-        Consider visual artifacts, inconsistencies, lighting, textures, and other indicators of generation.
-        A higher score means more likely to be real and lower score means more likely to be AI-generated.
-        
-        Output ONLY a valid JSON object with:
+        Analyze this image and determine whether it is AI-generated or real.
+        Return JSON only:
         {
-            "ai_probability": <float between 0.0 and 1.0>,
-            "verdict": "<Likely AI-generated / Likely Real / Uncertain>",
-            "explanation": "<Short reasoning, no emojis, under 200 chars>"
+          "ai_probability": <float 0.0 - 1.0>,
+          "verdict": "<Likely AI-generated / Likely Real / Uncertain>",
+          "explanation": "<Short reasoning, no emojis>"
         }
         """
 
@@ -158,12 +172,11 @@ def call_gemini_detection(image_path: str) -> Dict[str, Any]:
         parsed = json.loads(text)
         ai_prob = parsed.get("ai_probability", 0.5)
 
-        if ai_prob > 0.7:
-            parsed["verdict"] = "Likely AI-generated"
-        elif ai_prob < 0.3:
-            parsed["verdict"] = "Likely Real"
-        else:
-            parsed["verdict"] = "Uncertain"
+        parsed["verdict"] = (
+            "Likely AI-generated" if ai_prob > 0.7 else
+            "Likely Real" if ai_prob < 0.3 else
+            "Uncertain"
+        )
 
         return parsed
 
@@ -173,35 +186,34 @@ def call_gemini_detection(image_path: str) -> Dict[str, Any]:
 
 # ------------------------- Combine Vision + Vertex + Gemini -------------------------
 def score_ai_likelihood(vision_data: Dict[str, Any], vertex_result: Dict[str, Any]) -> Dict[str, Any]:
-    """Combine Vision AI and Vertex AI signals to generate authenticity verdict."""
     explanation = []
     ai_prob = 0.5
     web_info = vision_data.get("web", {})
 
     if web_info.get("exact_matches"):
-        explanation.append("✅ Exact matches found online — likely real.")
+        explanation.append("Exact matches found online — likely real.")
         ai_prob -= 0.3
     elif web_info.get("similar_images"):
-        explanation.append("⚠️ Similar images found — moderate authenticity.")
+        explanation.append("Similar images found — moderately authentic.")
         ai_prob -= 0.1
     else:
-        explanation.append("❌ No web presence — may be AI-generated.")
+        explanation.append("No web presence — may be AI-generated.")
         ai_prob += 0.25
 
     if vision_data.get("faces"):
-        explanation.append("✅ Faces detected — consistent with real photos.")
+        explanation.append("Faces detected — consistent with real photos.")
         ai_prob -= 0.1
 
     if "displayNames" in vertex_result and "confidences" in vertex_result:
         preds = list(zip(vertex_result["displayNames"], vertex_result["confidences"]))
         top_pred, top_conf = preds[0]
-        explanation.append(f"🧠 Vertex AI predicts '{top_pred}' with {round(top_conf * 100, 1)}% confidence.")
+        explanation.append(f"Vertex predicts '{top_pred}' ({round(top_conf * 100)}%).")
         if "fake" in top_pred.lower() or "ai" in top_pred.lower():
             ai_prob += top_conf * 0.6
         else:
             ai_prob -= top_conf * 0.6
     else:
-        explanation.append("⚠️ Vertex AI result unavailable or malformed.")
+        explanation.append("Vertex failed — using fallback.")
 
     ai_prob = max(0.0, min(1.0, ai_prob))
     verdict = "Likely AI-generated" if ai_prob > 0.7 else "Likely Real" if ai_prob < 0.3 else "Uncertain"
@@ -222,30 +234,24 @@ def _evaluate_single_image(url_or_path: str) -> Dict[str, Any]:
         else:
             path = url_or_path
         
-        # Vision AI
         vision_data = analyze_image(path)
-        # Vertex AI
         vertex_result = call_vertex_ai_prediction(path)
 
-        # ----------------- Gemini Fallback -----------------
         if not vertex_result or "error" in vertex_result or not vertex_result.get("displayNames"):
-            print("[Fallback] Vertex AI returned empty or invalid result. Using Gemini...")
+            print("[Fallback] Using Gemini...")
             gemini_result = call_gemini_detection(path)
             ai_prob = gemini_result.get("ai_probability", 0.5)
-            verdict = gemini_result.get("verdict", "Uncertain")
-            explanation = gemini_result.get("explanation", "Gemini fallback used.")
             final_score = int((1 - ai_prob) * 100)
 
             return {
                 "image_source": url_or_path,
                 "score": final_score,
-                "verdict": verdict,
-                "explanation": explanation,
+                "verdict": gemini_result.get("verdict", "Uncertain"),
+                "explanation": gemini_result.get("explanation", "Gemini fallback used."),
                 "vision_details": vision_data,
                 "vertex_ai_result": {"gemini_result": gemini_result},
             }
 
-        # ----------------- Vertex + Vision Normal Path -----------------
         result = score_ai_likelihood(vision_data, vertex_result)
         final_score = int((1 - result["ai_probability"]) * 100)
 
@@ -274,7 +280,7 @@ def detect_fake_image(inputs: Union[str, List[str]]) -> Union[Dict[str, Any], Li
         return _evaluate_single_image(inputs)
     elif isinstance(inputs, list):
         results = [_evaluate_single_image(i) for i in inputs]
-        print(f"[detect_fake_image] Processed {len(inputs)} image(s).")
+        print(f"[detect_fake_image] Processed {len(inputs)} images.")
         return results
     else:
         raise ValueError("Input must be a string or a list of strings.")
@@ -282,5 +288,5 @@ def detect_fake_image(inputs: Union[str, List[str]]) -> Union[Dict[str, Any], Li
 
 # ------------------------- Example Usage -------------------------
 if __name__ == "__main__":
-    test_url = "https://cdn.pixabay.com/photo/2024/05/28/16/39/ai-generated-8794203_1280.png"
+    test_url = "https://example.com/sample_image.jpg"
     print(json.dumps(detect_fake_image(test_url), indent=2))

@@ -274,7 +274,9 @@ function displayResult(result) {
       <span class="prediction-badge ${predictionClass}">${prediction}</span>
     </div>
     <div class="result-explanation">
-      <strong>Analysis:</strong> ${explanation}
+      <div class="result-explanation">
+        <strong>Analysis:</strong> ${marked.parse(explanation)}
+      </div>
     </div>
   `;
 
@@ -559,7 +561,7 @@ function showConfirmationPopup(text, explanation) {
 }
 
 function submitFeedback(responseType) {
-  fetch("http://localhost:5000/submit_feedback", {
+  fetch("https://h2sdemo-804712050799.us-central1.run.app/submit_feedback", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
