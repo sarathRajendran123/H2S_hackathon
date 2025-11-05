@@ -36,12 +36,6 @@ function cancelSession() {
 
 window.addEventListener('beforeunload', cancelSession);
 
-document.addEventListener('visibilitychange', () => {
-  if (document.hidden) {
-    cancelSession();
-  }
-});
-
 if (typeof chrome !== 'undefined' && chrome.runtime) {
   chrome.runtime.onSuspend?.addListener(() => {
     cancelSession();
@@ -1735,7 +1729,7 @@ chrome.runtime.onMessage.addListener(message => {
 // ---------------------------
 // AUTO RUN TEXT ANALYSIS
 // ---------------------------
-setTimeout(analyzeTextNow, 2000);
+setTimeout(analyzeTextNow, 5000);
 
 // ---------------------------
 // BADGE CLICK TOGGLE

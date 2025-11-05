@@ -60,20 +60,8 @@ def get_access_token():
 
 
 # ---------------- Embeddings ----------------
-embedder = None
 
-def get_embedder():
-    global embedder
-    if embedder is None:
-        from sentence_transformers import SentenceTransformer
-        embedder = SentenceTransformer("./models/all-MiniLM-L6-v2")
-    return embedder
-
-@lru_cache(maxsize=8192)
-def get_embedding(text: str):
-    model = get_embedder()
-    return model.encode(text, convert_to_tensor=True)
-
+from embedding_service import get_embedding
 
 # ---------------- Constants ----------------
 CLAIM_MIN_LEN = 30

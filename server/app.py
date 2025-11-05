@@ -4,9 +4,9 @@ from flask_cors import CORS
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from vectorDb import search_feedback_semantic, store_feedback, cleanup_expired
-from database import generate_id, generate_normalized_id, generate_embedding, get_article_doc, firestore_semantic_search, db
+from database import generate_id, generate_normalized_id, generate_embedding, get_article_doc, firestore_semantic_search
 from FakeImageDetection import detect_fake_image
-from firebase_admin import firestore
+from google.cloud import firestore
 from tasks import cancel_session_tasks, get_session_tasks 
 from datetime import datetime
 import os
@@ -17,11 +17,15 @@ import queue
 import json
 import threading
 from translate import translate_to_english
+from sentence_transformers import SentenceTransformer
+from embedding_service import get_embedding, embed_text
+from database import db
 
 load_dotenv()
 
 app = Flask(__name__)
 app.secret_key = os.getenv("APP_SECRET_KEY")
+
 CORS(app,
      resources={r"/*": {"origins": "*"}},
      supports_credentials=True,

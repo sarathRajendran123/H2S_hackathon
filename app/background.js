@@ -392,9 +392,8 @@ chrome.tabs.onRemoved.addListener((tabId, removeInfo) => {
   clearSessionForTab(tabId);
 });
 
-chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
-  if (changeInfo.status === 'loading' && changeInfo.url) {
-    console.log(`Tab ${tabId} navigating to ${changeInfo.url}, cancelling old session...`);
+chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+  if (changeInfo.status === 'complete') {
     clearSessionForTab(tabId);
   }
 });

@@ -1,12 +1,13 @@
 import hashlib
 from datetime import datetime, timedelta
-from sentence_transformers import SentenceTransformer, util
 from pinecone import Pinecone, ServerlessSpec
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.backends import default_backend
 from dotenv import load_dotenv
 import os
 from typing import Optional
+
+from embedding_service import get_embedding 
 
 # -----------------------------
 # CONFIGURATION & GLOBALS
@@ -18,27 +19,15 @@ INDEX_NAME = "fact-check-cache"
 NAMESPACE = "default"
 VERIFIED_NAMESPACE = "verified_fakes"
 
-# Lazy-loaded globals
-EMBED_MODEL = None
-pc = None
-index = None
+pc = None     
+index = None   
 
 
 # -----------------------------
-# LAZY LOADERS
+# INIT PINECONE (lazy)
 # -----------------------------
-def get_embed_model():
-    """Lazy load the MiniLM embedding model AFTER app startup."""
-    global EMBED_MODEL
-    if EMBED_MODEL is None:
-        print("🔹 Loading MiniLM embedder (lazy load)...")
-        EMBED_MODEL = SentenceTransformer("./models/all-MiniLM-L6-v2")
-        print("✅ MiniLM Loaded")
-    return EMBED_MODEL
-
-
 def init_pinecone():
-    """Lazy init Pinecone to avoid Cloud Run cold start failures."""
+    """Lazy init Pinecone to avoid cold start failures on Cloud Run."""
     global pc, index
 
     if pc is None:
@@ -50,13 +39,14 @@ def init_pinecone():
 
     if index is None:
         print("🔹 Checking Pinecone index...")
-        existing = [i["name"] for i in pc.list_indexes()]  # <== moved inside init
+
+        existing = [i["name"] for i in pc.list_indexes()]  
 
         if INDEX_NAME not in existing:
             print(f"🟢 Creating Pinecone index '{INDEX_NAME}'...")
             pc.create_index(
                 name=INDEX_NAME,
-                dimension=384,
+                dimension=384,              
                 metric="cosine",
                 spec=ServerlessSpec(cloud="aws", region="us-east-1"),
             )
@@ -68,14 +58,18 @@ def init_pinecone():
 
 
 # -----------------------------
-# HELPERS
+# EMBEDDINGS (now shared)
 # -----------------------------
 def embed_text(text: str) -> list:
-    model = get_embed_model()
+    """Embedding using shared global EMBEDDER (cached)."""
     normalized = text.lower().strip()
-    return model.encode(normalized).tolist()
+    emb_tensor = get_embedding(normalized)
+    return emb_tensor.tolist()            
 
 
+# -----------------------------
+# HELPERS
+# -----------------------------
 def anon_user_id(fingerprint: str) -> str:
     digest = hashes.Hash(hashes.SHA256(), backend=default_backend())
     digest.update(fingerprint.encode())
@@ -139,6 +133,7 @@ def search_feedback(text: str, article_id: Optional[str] = None) -> dict:
 def search_feedback_semantic(
     text: str, article_id: Optional[str] = None, verified_only: bool = False
 ) -> dict:
+
     if not text.strip():
         return {"error": "No text provided"}
 
@@ -182,7 +177,7 @@ def search_feedback_semantic(
 
 
 # -----------------------------
-# STORE USER FEEDBACK
+# STORE FEEDBACK
 # -----------------------------
 def store_feedback(
     text: str,
@@ -194,6 +189,7 @@ def store_feedback(
     prediction: str = "Unknown",
     verified: bool = True,
 ) -> dict:
+
     if not text.strip() or not explanation:
         return {"error": "Missing text or explanation"}
 
@@ -241,7 +237,7 @@ def store_feedback(
 
 
 # -----------------------------
-# CLEANUP EXPIRED VECTORS
+# CLEANUP EXPIRED CACHE
 # -----------------------------
 def cleanup_expired(days: int = 15) -> dict:
     index = init_pinecone()

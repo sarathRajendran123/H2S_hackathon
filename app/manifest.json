@@ -23,10 +23,9 @@
   "content_scripts": [
     {
       "matches": ["https://*/*", "http://*/*"],
-
       "exclude_matches": [
         "*://*.google.com/*",
-        "*://*.google.co.*/*",
+        "*://*.google.co/*",
         "*://*.bing.com/*",
         "*://*.duckduckgo.com/*",
         "*://*.search.brave.com/*",
@@ -51,11 +50,10 @@
         "*://*.razorpay.com/*",
         "*://*.paytm.com/*",
         "*://*.amazon.in/gp/buy/*",
-        "*://*.bank*/*",
+        "*://*.bank/*",     
 
-        "*://accounts.google.com/*",
-        "*://login.*/*",
-        "*://auth.*/*",
+        "*://*/login/*",  
+        "*://*/auth/*",   
 
         "*://github.com/*",
         "*://gitlab.com/*",
