@@ -247,19 +247,18 @@ function sanitize(text) {
 }
 
 function displayResult(result) {
+  switchTab("results");
   hideLoading();
   showResults();
-  updateResultsEmptyState();
-  updateHistoryEmptyState();
 
   const resultsDiv = $("results");
   if (!resultsDiv) return;
-  resultsDiv.innerHTML = "";
+
+  resultsDiv.innerHTML = "";  
 
   const prediction = result.prediction || "Unknown";
   const explanation = result.explanation || "No explanation provided";
   const text = result.input_text || result.text || "unknown";
-
   const predictionClass = prediction.toLowerCase();
 
   const card = document.createElement("div");
@@ -269,23 +268,23 @@ function displayResult(result) {
       <span class="result-label">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
           <path d="M12 2L3 7V11C3 16.55 6.84 21.74 12 23C17.16 21.74 21 16.55 21 11V7L12 2Z"
-           stroke="currentColor" stroke-width="2"/>
+          stroke="currentColor" stroke-width="2"/>
         </svg>
         Trust Analysis
       </span>
       <span class="prediction-badge ${predictionClass}">${prediction}</span>
     </div>
     <div class="result-explanation">
-      <div class="result-explanation">
-        <strong>Analysis:</strong><br>
-        ${sanitize(explanation)}
-      </div>
+      <strong>Analysis:</strong><br>
+      ${sanitize(explanation)}
     </div>
   `;
 
   resultsDiv.appendChild(card);
 
-  // Save to history
+  updateResultsEmptyState();
+  updateHistoryEmptyState();
+
   saveToHistory({
     score: calculateConfidenceScore(result),
     prediction,
@@ -298,11 +297,7 @@ function displayResult(result) {
   }
 }
 
-const originalDisplayResult = displayResult;
-displayResult = function(result) {
-  switchTab("results");
-  originalDisplayResult(result);
-};
+
 // ==========================================
 // ERROR & FEEDBACK MESSAGES
 // ==========================================
