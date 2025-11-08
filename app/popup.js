@@ -238,11 +238,7 @@ function updateHistoryEmptyState() {
 document.getElementById("tabResults").onclick = () => switchTab("results");
 document.getElementById("tabHistory").onclick = () => switchTab("historyContainer");
 
-const originalDisplayResult = displayResult;
-displayResult = function(result) {
-  switchTab("results");
-  originalDisplayResult(result);
-};
+
 function sanitize(text) {
   return text
     .replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>")   // convert **bold**
@@ -302,6 +298,11 @@ function displayResult(result) {
   }
 }
 
+const originalDisplayResult = displayResult;
+displayResult = function(result) {
+  switchTab("results");
+  originalDisplayResult(result);
+};
 // ==========================================
 // ERROR & FEEDBACK MESSAGES
 // ==========================================
@@ -479,6 +480,8 @@ function renderHistory() {
 
   const history = JSON.parse(localStorage.getItem("analysisHistory") || "[]");
 
+  container.innerHTML = ""; 
+
   history.forEach(item => {
     const card = document.createElement("div");
     card.className = "history-card";
@@ -493,9 +496,10 @@ function renderHistory() {
         <p><strong>Details:</strong> ${item.explanation}</p>
       </div>
     `;
-    updateHistoryEmptyState();
     container.appendChild(card);
   });
+
+  updateHistoryEmptyState();
 }
 
 // ==========================================
