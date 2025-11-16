@@ -1,6 +1,7 @@
 # 🔍 TrustMeter  
 **AI-Powered Truth Verification**  
 Your real-time guardian against misinformation.
+Chrome Store - https://chromewebstore.google.com/detail/nkkckneeocjfbmhadefiekajfnbmhgka?utm_source=item-share-cb
 
 ---
 
