@@ -2,6 +2,8 @@
 **AI-Powered Truth Verification**  
 Your real-time guardian against misinformation.
 
+[![Install on Chrome Web Store](https://img.shields.io/badge/Chrome%20Web%20Store-Install-blue?logo=google-chrome&style=for-the-badge)](https://chromewebstore.google.com/detail/nkkckneeocjfbmhadefiekajfnbmhgka)
+
 ---
 
 ## 🧭 Table of Contents  
